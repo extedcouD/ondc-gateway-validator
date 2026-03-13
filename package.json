@@ -1,0 +1,27 @@
+{
+    "name": "onix-val-gen",
+    "version": "1.0.0",
+    "description": "A basic TypeScript project",
+    "main": "dist/index.js",
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "dev": "ts-node src/index.ts",
+        "watch": "tsc --watch"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "devDependencies": {
+        "@types/glob": "^8.1.0",
+        "@types/js-yaml": "^4.0.9",
+        "@types/node": "^25.5.0",
+        "typescript": "^5.9.3"
+    },
+    "dependencies": {
+        "glob": "^13.0.6",
+        "js-yaml": "^4.1.1",
+        "ondc-code-generator": "^1.0.1",
+        "ts-node": "^10.9.2"
+    }
+}

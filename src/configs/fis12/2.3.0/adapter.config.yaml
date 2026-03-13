@@ -1,0 +1,6 @@
+domain: "ONDC:FIS12"
+version: "2.3.0"
+roles:
+    - bap
+stateFullValidations: true
+debugMode: false

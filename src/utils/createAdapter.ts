@@ -120,26 +120,26 @@ export function createAdapter(): void {
 
     const generatedModules: AdapterModule[] = [];
 
-    // 2. Discover all build.yaml files
-    const buildFiles = globSync("**/build.yaml", {
+    // 2. Discover all adapter.config.yaml files (separate from OpenAPI build.yaml)
+    const buildFiles = globSync("**/adapter.config.yaml", {
         cwd: CONFIG_FOLDER,
         absolute: true,
     });
 
     if (buildFiles.length === 0) {
         console.warn(
-            `[createAdapter] No build.yaml files found under ${CONFIG_FOLDER}`,
+            `[createAdapter] No adapter.config.yaml files found under ${CONFIG_FOLDER}`,
         );
     }
 
-    // 3. Parse each build.yaml and generate modules (bap role only)
+    // 3. Parse each adapter.config.yaml and generate modules (bap role only)
     for (const filePath of buildFiles) {
         const raw = fs.readFileSync(filePath, "utf8");
         const cfg = yaml.load(raw) as BuildConfig;
 
         if (!cfg || !cfg.domain || !cfg.version || !Array.isArray(cfg.roles)) {
             console.warn(
-                `[createAdapter] Skipping malformed build.yaml: ${filePath}`,
+                `[createAdapter] Skipping malformed adapter.config.yaml: ${filePath}`,
             );
             continue;
         }

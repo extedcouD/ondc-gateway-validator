@@ -3,9 +3,13 @@
 // ---------------------------------------------------------------------------
 
 import { createAdapter } from "./utils/createAdapter";
+import { createSchemas } from "./utils/createSchemas";
+import { createPlugins } from "./utils/createPlugins";
 
-function main(): void {
+async function main(): Promise<void> {
     createAdapter();
+    await createSchemas();
+    await createPlugins();
 }
 
 main();

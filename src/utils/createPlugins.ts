@@ -48,6 +48,11 @@ function copyDir(src: string, dest: string): void {
     fs.cpSync(src, dest, { recursive: true });
 }
 
+/** Escape special regex characters in a literal string (e.g. dots and slashes in module paths). */
+function escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // ---------------------------------------------------------------------------
 // Step 1: generateValidations – runs validations.sh for one domain/version
 // ---------------------------------------------------------------------------
@@ -87,9 +92,72 @@ async function generateValidations(entry: DomainEntry): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// rewriteModuleName
+//   Recursively rewrites every .go and go.mod file in `dir`, replacing all
+//   occurrences of the old module import path with the new unique one.
+//   This ensures two plugins compiled from the same template have distinct
+//   Go import paths and don't trigger "plugin already loaded".
+// ---------------------------------------------------------------------------
+
+function rewriteModuleName(
+    dir: string,
+    oldName: string,
+    newName: string,
+): void {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            rewriteModuleName(fullPath, oldName, newName);
+        } else if (
+            entry.isFile() &&
+            (entry.name.endsWith(".go") ||
+                entry.name === "go.mod" ||
+                entry.name === "go.sum")
+        ) {
+            const content = fs.readFileSync(fullPath, "utf8");
+            // Replace exact module declaration and all import paths that start with oldName
+            // e.g. "validationpkg" → "validationpkg_ONDCFIS12_200"
+            //      "validationpkg/jsonvalidations" → "validationpkg_ONDCFIS12_200/jsonvalidations"
+            const esc = escapeRegex(oldName);
+            const updated = content
+                // module declaration  e.g.  module validationpkg  or  module github.com/foo/bar
+                .replace(
+                    new RegExp(`module ${esc}(?=$|\\s)`, "gm"),
+                    `module ${newName}`,
+                )
+                // replace directive  e.g.  replace validationpkg => ./...
+                .replace(
+                    new RegExp(`replace ${esc}(?=\\s|$)`, "gm"),
+                    `replace ${newName}`,
+                )
+                // inline require  e.g.  require validationpkg v0.0.0-...
+                .replace(
+                    new RegExp(`require ${esc}(?=\\s|$)`, "gm"),
+                    `require ${newName}`,
+                )
+                // block require  e.g.  \tvalidationpkg v0.0.0-...
+                .replace(
+                    new RegExp(`^(\\t)${esc}(\\s+v)`, "gm"),
+                    `$1${newName}$2`,
+                )
+                // Go import strings  e.g.  "validationpkg/storageutils"  or  "github.com/foo/bar/pkg"
+                .replace(
+                    new RegExp(`"${esc}(\/[^"]*)?"`, "g"),
+                    (_match, sub) => `"${newName}${sub ?? ""}"`,
+                );
+            if (updated !== content) {
+                fs.writeFileSync(fullPath, updated, "utf8");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Step 2: assembleOndcValidatorPlugin
 //   • Copy go-templates/ → build-output/plugins/ondcvalidator_<id>/
 //   • Replace ondc-validator/validationpkg with the generated one
+//   • Rewrite validationpkg module name to a unique id to avoid "plugin already loaded"
 //   • Build .so from ondc-validator/cmd
 // ---------------------------------------------------------------------------
 
@@ -132,25 +200,69 @@ function assembleOndcValidatorPlugin(entry: DomainEntry): void {
     fs.rmSync(targetValidationpkg, { recursive: true, force: true });
     copyDir(generatedValidationpkg, targetValidationpkg);
 
-    // 3. Build .so from ondc-validator/cmd
-    const soFile = path.join(pluginDir, `${id}.so`);
-    console.log(`[createPlugins] Building ${id}.so ...`);
+    // 3a. Rewrite validationpkg sub-module name to a unique id.
+    const uniqueModuleName = `validationpkg_${id}`;
+    console.log(
+        `[createPlugins] Rewriting module name: validationpkg → ${uniqueModuleName}`,
+    );
+    rewriteModuleName(pluginDir, "validationpkg", uniqueModuleName);
 
-    try {
-        execSync(
-            `go build -buildmode=plugin -o "${soFile}" ./ondc-validator/cmd`,
-            {
-                cwd: pluginDir,
-                stdio: "inherit",
-                shell: "/bin/bash",
-                env: { ...process.env, CGO_ENABLED: "1" },
-            },
+    // 3b. Rewrite the ROOT module path to a unique value.
+    //     Go's plugin loader uses the root module path baked into the binary
+    //     to detect duplicates. Two .so files built from the same root module
+    //     path will trigger "plugin already loaded" even with different filenames.
+    const rootGoMod = path.join(pluginDir, "go.mod");
+    const rootGoModContent = fs.readFileSync(rootGoMod, "utf8");
+    const rootModuleMatch = rootGoModContent.match(/^module\s+(\S+)/m);
+    if (!rootModuleMatch) {
+        throw new Error(
+            `[createPlugins] Cannot find module declaration in ${rootGoMod}`,
         );
-        console.log(`✅ Built ${id}.so`);
-    } catch (error: any) {
-        console.error(`❌ Failed to build ${id}.so`);
-        throw error;
     }
+    const rootModuleName = rootModuleMatch[1];
+    const uniqueRootModule = `${rootModuleName}-${id}`;
+    console.log(
+        `[createPlugins] Rewriting root module: ${rootModuleName} → ${uniqueRootModule}`,
+    );
+    rewriteModuleName(pluginDir, rootModuleName, uniqueRootModule);
+
+    // 4. Regenerate go.sum files – the rename invalidates existing checksum entries.
+    //    Run go mod tidy in validationpkg submodule first, then the root module.
+    //    The actual .so compilation happens inside Docker so Go versions match exactly.
+    const validationpkgDir = path.join(
+        pluginDir,
+        "ondc-validator",
+        "validationpkg",
+    );
+    console.log(`[createPlugins] Running go mod tidy in validationpkg ...`);
+    execSync("go mod tidy", {
+        cwd: validationpkgDir,
+        stdio: "inherit",
+        shell: "/bin/bash",
+        env: {
+            ...process.env,
+            CGO_ENABLED: "1",
+            GONOSUMCHECK: "*",
+            GONOSUMDB: "*",
+            GOFLAGS: "-mod=mod",
+        },
+    });
+
+    console.log(`[createPlugins] Running go mod tidy in plugin root ...`);
+    execSync("go mod tidy", {
+        cwd: pluginDir,
+        stdio: "inherit",
+        shell: "/bin/bash",
+        env: {
+            ...process.env,
+            CGO_ENABLED: "1",
+            GONOSUMCHECK: "*",
+            GONOSUMDB: "*",
+            GOFLAGS: "-mod=mod",
+        },
+    });
+
+    console.log(`✅ Assembled ${id} (will be built inside Docker)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -171,24 +283,8 @@ function assembleSchemaValidatorPlugin(): void {
     }
     copyDir(TEMPLATES_DIR, pluginDir);
 
-    const soFile = path.join(pluginDir, "schemavalidator.so");
-    console.log(`[createPlugins] Building schemavalidator.so ...`);
-
-    try {
-        execSync(
-            `go build -buildmode=plugin -o "${soFile}" ./schemavalidator/cmd`,
-            {
-                cwd: pluginDir,
-                stdio: "inherit",
-                shell: "/bin/bash",
-                env: { ...process.env, CGO_ENABLED: "1" },
-            },
-        );
-        console.log(`✅ Built schemavalidator.so`);
-    } catch (error: any) {
-        console.error(`❌ Failed to build schemavalidator.so`);
-        throw error;
-    }
+    // .so compilation happens inside Docker so Go versions match exactly.
+    console.log(`✅ Assembled schemavalidator (will be built inside Docker)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,5 +358,7 @@ export async function createPlugins(): Promise<void> {
     // Step 3: Assemble + build schemavalidator once
     assembleSchemaValidatorPlugin();
 
-    console.log("[createPlugins] All plugins built.");
+    console.log(
+        "[createPlugins] All plugins assembled (Docker will build the .so files).",
+    );
 }

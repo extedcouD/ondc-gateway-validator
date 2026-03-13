@@ -1,6 +1,6 @@
-appName: workbench-onix-ONDC:TRV11-2.0.1
+appName: ondc-gateway-validator
 log:
-    level: debug
+    level: info
     destinations:
         - type: stdout
     contextKeys:

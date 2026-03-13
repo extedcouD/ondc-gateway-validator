@@ -51,7 +51,7 @@ interface AdapterModule {
 function moduleId(domain: string, version: string, role: string): string {
     const domainTag = domain.replace(/[^a-zA-Z0-9]/g, ""); // e.g. ONDCFIS12
     const versionTag = version.replace(/\./g, ""); // e.g. 200
-    return `${domainTag}_${versionTag}_${role}`;
+    return `${domainTag}_${versionTag}`;
 }
 
 /**
